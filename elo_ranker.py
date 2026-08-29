@@ -352,22 +352,56 @@ def show_image(name):
         st.image(img, use_container_width=True)
 
 
-# Plain top-to-bottom order, no columns: image1, button1, button2, image2.
-# This is the same on every screen size, since it's just normal render
-# order rather than a CSS override trying to out-guess Streamlit's
-# internal HTML structure.
-show_image(name_a)
-if st.button(name_a, use_container_width=True):
-    with st.spinner("Saving your vote..."):
-        register_vote(name_a, name_b)
-    st.rerun()
+# Four elements, in this fixed order: image1, button1, button2, image2.
+# A CSS grid on the wrapping container decides how those four are
+# visually arranged per screen size - desktop pairs each image with its
+# own button side by side, mobile stacks them with both buttons together
+# in the middle. The selector covers two possible Streamlit testid names
+# since which one applies can vary by version.
+st.html("""
+<style>
+.st-key-vote_row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+        "img1 img2"
+        "btn1 btn2";
+    column-gap: 1rem;
+    row-gap: 0.5rem;
+}
+.st-key-vote_row [data-testid="stElementContainer"]:nth-of-type(1),
+.st-key-vote_row [data-testid="element-container"]:nth-of-type(1) { grid-area: img1; }
+.st-key-vote_row [data-testid="stElementContainer"]:nth-of-type(2),
+.st-key-vote_row [data-testid="element-container"]:nth-of-type(2) { grid-area: btn1; align-self: end; }
+.st-key-vote_row [data-testid="stElementContainer"]:nth-of-type(3),
+.st-key-vote_row [data-testid="element-container"]:nth-of-type(3) { grid-area: btn2; align-self: end; }
+.st-key-vote_row [data-testid="stElementContainer"]:nth-of-type(4),
+.st-key-vote_row [data-testid="element-container"]:nth-of-type(4) { grid-area: img2; }
 
-if st.button(name_b, use_container_width=True):
-    with st.spinner("Saving your vote..."):
-        register_vote(name_b, name_a)
-    st.rerun()
+@media (max-width: 640px) {
+    .st-key-vote_row {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+            "img1"
+            "btn1"
+            "btn2"
+            "img2";
+    }
+}
+</style>
+""")
 
-show_image(name_b)
+with st.container(key="vote_row"):
+    show_image(name_a)
+    if st.button(name_a, use_container_width=True):
+        with st.spinner("Saving your vote..."):
+            register_vote(name_a, name_b)
+        st.rerun()
+    if st.button(name_b, use_container_width=True):
+        with st.spinner("Saving your vote..."):
+            register_vote(name_b, name_a)
+        st.rerun()
+    show_image(name_b)
 
 if st.button("Skip this pair"):
     with st.spinner("Loading next matchup..."):
