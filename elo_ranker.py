@@ -23,7 +23,7 @@ INITIAL_RATING = 1500
 
 # --- anti-abuse tuning (no hard caps - voting is never blocked) ---
 DAMPING_WINDOW_HOURS = 1         # window used to count an identity's "recent" votes
-FREE_VOTES_BEFORE_DAMPING = 200  # votes in that window before influence starts shrinking
+FREE_VOTES_BEFORE_DAMPING = 500  # votes in that window before influence starts shrinking
 DAMPING_PER_EXTRA_VOTE = 0.15    # how fast K shrinks per vote past the free threshold
 MIN_K = 4                        # K never drops below this floor - votes always count for something
 PAIR_COOLDOWN_HOURS = 1          # don't re-show the same matchup to the same voter within this window
