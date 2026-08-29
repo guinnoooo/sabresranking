@@ -191,12 +191,14 @@ def load_ratings(supabase, players_df):
     return ratings_df
 
 
-def get_rating_row(supabase, name):
-    resp = supabase.table("ratings").select("*").eq("name", name).execute()
-    if not resp.data:
-        st.error(f"Couldn't find a rating row for {name} - try refreshing the page.")
+def get_rating_rows(supabase, names):
+    resp = supabase.table("ratings").select("*").in_("name", names).execute()
+    rows = {row["name"]: row for row in (resp.data or [])}
+    missing = [n for n in names if n not in rows]
+    if missing:
+        st.error(f"Couldn't find rating rows for: {', '.join(missing)} - try refreshing the page.")
         st.stop()
-    return resp.data[0]
+    return rows
 
 
 # ---------- Elo math ----------
@@ -216,16 +218,22 @@ def update_elo(rating_a, rating_b, score_a, k):
 
 # ---------- anti-abuse checks ----------
 
-def recent_vote_count(supabase, voter_id, minutes):
-    cutoff = (pd.Timestamp.utcnow() - pd.Timedelta(minutes=minutes)).isoformat()
+def fetch_recent_votes(supabase, voter_id, hours):
+    """One query covering both the damping count and the pair-cooldown
+    check, since both just need this voter's recent votes."""
+    cutoff = (pd.Timestamp.utcnow() - pd.Timedelta(hours=hours)).isoformat()
     resp = (
         supabase.table("votes")
-        .select("id", count="exact")
+        .select("winner,loser,created_at")
         .eq("voter_id", voter_id)
         .gte("created_at", cutoff)
         .execute()
     )
-    return resp.count or 0
+    return resp.data or []
+
+
+def pairs_from_votes(votes):
+    return {frozenset((v["winner"], v["loser"])) for v in votes}
 
 
 def effective_k(votes_in_window):
@@ -239,18 +247,6 @@ def effective_k(votes_in_window):
     over_threshold = max(0, votes_in_window - FREE_VOTES_BEFORE_DAMPING)
     k = K_FACTOR / (1 + over_threshold * DAMPING_PER_EXTRA_VOTE)
     return max(MIN_K, k)
-
-
-def recent_pairs_for_voter(supabase, voter_id, hours):
-    cutoff = (pd.Timestamp.utcnow() - pd.Timedelta(hours=hours)).isoformat()
-    resp = (
-        supabase.table("votes")
-        .select("winner,loser")
-        .eq("voter_id", voter_id)
-        .gte("created_at", cutoff)
-        .execute()
-    )
-    return {frozenset((row["winner"], row["loser"])) for row in (resp.data or [])}
 
 
 # ---------- pair selection ----------
@@ -294,12 +290,16 @@ if "ratings_df" not in st.session_state:
     st.session_state.ratings_df = load_ratings(supabase, players_df)
 
 if "current_pair" not in st.session_state:
-    excluded = recent_pairs_for_voter(supabase, voter_id, PAIR_COOLDOWN_HOURS)
+    recent_votes = fetch_recent_votes(supabase, voter_id, PAIR_COOLDOWN_HOURS)
+    excluded = pairs_from_votes(recent_votes)
     st.session_state.current_pair = pick_pair(st.session_state.ratings_df, excluded_pairs=excluded)
     st.session_state.last_pair = None
 
 ratings_df = st.session_state.ratings_df
 name_a, name_b = st.session_state.current_pair
+
+if st.session_state.pop("vote_confirmed", False):
+    st.toast("Vote recorded!", icon="✅")
 
 st.title("Who's the greatest Sabre?")
 total_votes = int(ratings_df["comparisons"].sum() / 2)
@@ -307,33 +307,47 @@ st.caption(f"{total_votes} comparisons made so far · {len(ratings_df)} players 
 
 
 def register_vote(winner, loser):
-    recent = recent_vote_count(supabase, voter_id, DAMPING_WINDOW_HOURS * 60)
+    window_hours = max(DAMPING_WINDOW_HOURS, PAIR_COOLDOWN_HOURS)
+    recent_votes = fetch_recent_votes(supabase, voter_id, window_hours)
 
-    winner_row = get_rating_row(supabase, winner)
-    loser_row = get_rating_row(supabase, loser)
-    k = effective_k(recent)
-    new_winner_rating, new_loser_rating = update_elo(winner_row["rating"], loser_row["rating"], 1, k)
+    damping_cutoff = pd.Timestamp.utcnow() - pd.Timedelta(hours=DAMPING_WINDOW_HOURS)
+    recent_count = sum(1 for v in recent_votes if pd.Timestamp(v["created_at"]) >= damping_cutoff)
 
-    supabase.table("ratings").update({
-        "rating": new_winner_rating,
-        "comparisons": winner_row["comparisons"] + 1,
-    }).eq("name", winner).execute()
-    supabase.table("ratings").update({
-        "rating": new_loser_rating,
-        "comparisons": loser_row["comparisons"] + 1,
-    }).eq("name", loser).execute()
+    cooldown_cutoff = pd.Timestamp.utcnow() - pd.Timedelta(hours=PAIR_COOLDOWN_HOURS)
+    excluded_pairs = {
+        frozenset((v["winner"], v["loser"]))
+        for v in recent_votes
+        if pd.Timestamp(v["created_at"]) >= cooldown_cutoff
+    }
+
+    rows = get_rating_rows(supabase, [winner, loser])
+    k = effective_k(recent_count)
+    new_winner_rating, new_loser_rating = update_elo(rows[winner]["rating"], rows[loser]["rating"], 1, k)
+    new_winner_comparisons = rows[winner]["comparisons"] + 1
+    new_loser_comparisons = rows[loser]["comparisons"] + 1
+
+    supabase.table("ratings").upsert([
+        {"name": winner, "rating": new_winner_rating, "comparisons": new_winner_comparisons},
+        {"name": loser, "rating": new_loser_rating, "comparisons": new_loser_comparisons},
+    ]).execute()
     supabase.table("votes").insert({
         "winner": winner,
         "loser": loser,
         "voter_id": voter_id,
     }).execute()
 
-    st.session_state.ratings_df = load_ratings(supabase, players_df)
-    st.session_state.last_pair = frozenset((name_a, name_b))
-    excluded = recent_pairs_for_voter(supabase, voter_id, PAIR_COOLDOWN_HOURS)
-    st.session_state.current_pair = pick_pair(
-        st.session_state.ratings_df, excluded_pairs=excluded, last_pair=st.session_state.last_pair
-    )
+    # update the in-memory copy directly instead of re-fetching the whole
+    # table - saves a full-table round trip on every single vote
+    df = st.session_state.ratings_df
+    df.loc[df["name"] == winner, "rating"] = new_winner_rating
+    df.loc[df["name"] == winner, "comparisons"] = new_winner_comparisons
+    df.loc[df["name"] == loser, "rating"] = new_loser_rating
+    df.loc[df["name"] == loser, "comparisons"] = new_loser_comparisons
+
+    excluded_pairs.add(frozenset((winner, loser)))
+    st.session_state.last_pair = frozenset((winner, loser))
+    st.session_state.current_pair = pick_pair(df, excluded_pairs=excluded_pairs, last_pair=st.session_state.last_pair)
+    st.session_state.vote_confirmed = True
 
 
 def show_image(name):
@@ -346,27 +360,31 @@ col1, col2 = st.columns(2)
 with col1:
     show_image(name_a)
     if st.button(name_a, use_container_width=True):
-        register_vote(name_a, name_b)
+        with st.spinner("Saving your vote..."):
+            register_vote(name_a, name_b)
         st.rerun()
 with col2:
     show_image(name_b)
     if st.button(name_b, use_container_width=True):
-        register_vote(name_b, name_a)
+        with st.spinner("Saving your vote..."):
+            register_vote(name_b, name_a)
         st.rerun()
 
 if st.button("Skip this pair"):
-    excluded = recent_pairs_for_voter(supabase, voter_id, PAIR_COOLDOWN_HOURS)
-    st.session_state.last_pair = frozenset((name_a, name_b))
-    st.session_state.current_pair = pick_pair(
-        ratings_df, excluded_pairs=excluded, last_pair=st.session_state.last_pair
-    )
+    with st.spinner("Loading next matchup..."):
+        recent_votes = fetch_recent_votes(supabase, voter_id, PAIR_COOLDOWN_HOURS)
+        excluded = pairs_from_votes(recent_votes)
+        st.session_state.last_pair = frozenset((name_a, name_b))
+        st.session_state.current_pair = pick_pair(
+            ratings_df, excluded_pairs=excluded, last_pair=st.session_state.last_pair
+        )
     st.rerun()
 
 st.divider()
 
 
 TOP_N_WITH_IMAGES = 10
-GRID_COLUMNS = 2
+GRID_COLUMNS = 5
 
 
 def render_top_grid(top_df, players_df):
