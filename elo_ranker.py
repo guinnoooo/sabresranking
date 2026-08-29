@@ -298,9 +298,6 @@ if "current_pair" not in st.session_state:
 ratings_df = st.session_state.ratings_df
 name_a, name_b = st.session_state.current_pair
 
-if st.session_state.pop("vote_confirmed", False):
-    st.toast("Vote recorded!", icon="✅")
-
 st.title("Who's the greatest Sabre?")
 total_votes = int(ratings_df["comparisons"].sum() / 2)
 st.caption(f"{total_votes} comparisons made so far · {len(ratings_df)} players in the pool")
@@ -347,7 +344,6 @@ def register_vote(winner, loser):
     excluded_pairs.add(frozenset((winner, loser)))
     st.session_state.last_pair = frozenset((winner, loser))
     st.session_state.current_pair = pick_pair(df, excluded_pairs=excluded_pairs, last_pair=st.session_state.last_pair)
-    st.session_state.vote_confirmed = True
 
 
 def show_image(name):
