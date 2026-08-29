@@ -1,36 +1,4 @@
-"""
-Pairwise Player Ranker (Supabase-backed)
------------------------------------------
-Public pairwise "who's better" ranking site. Votes are stored permanently
-in Supabase (Postgres) instead of a local CSV, plus some basic anti-abuse
-protections:
 
-  - voter identity: hashed IP address, falling back to a per-session id
-    when no IP is available (e.g. local development)
-  - matchup cooldown: the same voter won't be shown the same pair again
-    for a while, so they can't just repeatedly click one matchup
-  - diminishing influence: nobody is ever blocked from voting, but past
-    a threshold of votes in a day, each further vote from that identity
-    counts for progressively less - a burst from one source moves
-    ratings much less than the same number of votes spread across many
-    different voters
-
-Images: give players.csv an "image" column with a file path or URL, or
-drop a file named after the player (e.g. "Tom Brady.jpg") into an
-"images" folder next to this script - either is picked up automatically.
-Every photo is center-cropped to the same fixed portrait ratio, and
-shown both in the matchup view and in the rankings list below. Anyone
-with no photo found falls back to images/placeholder.jpg - add a file
-there to control what that looks like.
-
-One-time setup:
-  1. Create a free Supabase project, then run schema.sql in its SQL
-     editor (Database > SQL Editor) to create the tables.
-  2. Copy secrets.toml.example to .streamlit/secrets.toml and fill in
-     your Supabase URL/key. Never commit the real secrets.toml.
-  3. pip install -r requirements.txt
-  4. streamlit run elo_ranker.py
-"""
 
 import hashlib
 import os
@@ -74,13 +42,6 @@ def get_client():
 # ---------- voter identity ----------
 
 def get_voter_id():
-    """
-    Hashed IP when Streamlit can see one (true on real deployments),
-    otherwise a per-session random id as a weaker fallback (e.g. local
-    dev, where st.context.ip_address is always None).
-    Note: IP alone is spoofable (VPNs, shared networks) - this is a
-    deterrent layer, not a security guarantee.
-    """
     salt = st.secrets.get("supabase", {}).get("voter_salt", "local-dev-salt")
     ip = st.context.ip_address
     if ip:
@@ -131,12 +92,6 @@ def get_player_image(name, players_df):
 
 @st.cache_data(show_spinner=False)
 def load_cropped_image(path_or_url, max_width):
-    """
-    Open a local file or URL and center-crop it to IMAGE_ASPECT_RATIO,
-    so every player's photo displays at the same shape regardless of
-    what size/orientation the original was. Cached so the same image
-    isn't re-downloaded and re-cropped on every rerun.
-    """
     if path_or_url.startswith(("http://", "https://")):
         resp = requests.get(path_or_url, timeout=10)
         resp.raise_for_status()
@@ -219,8 +174,6 @@ def update_elo(rating_a, rating_b, score_a, k):
 # ---------- anti-abuse checks ----------
 
 def fetch_recent_votes(supabase, voter_id, hours):
-    """One query covering both the damping count and the pair-cooldown
-    check, since both just need this voter's recent votes."""
     cutoff = (pd.Timestamp.utcnow() - pd.Timedelta(hours=hours)).isoformat()
     resp = (
         supabase.table("votes")
@@ -237,13 +190,6 @@ def pairs_from_votes(votes):
 
 
 def effective_k(votes_in_window):
-    """
-    Nobody gets blocked - but the first FREE_VOTES_BEFORE_DAMPING votes
-    from an identity in the window count fully, and each vote past that
-    counts for progressively less. A burst from one source ends up
-    moving ratings far less than the same number of votes spread across
-    many different people.
-    """
     over_threshold = max(0, votes_in_window - FREE_VOTES_BEFORE_DAMPING)
     k = K_FACTOR / (1 + over_threshold * DAMPING_PER_EXTRA_VOTE)
     return max(MIN_K, k)
@@ -252,12 +198,6 @@ def effective_k(votes_in_window):
 # ---------- pair selection ----------
 
 def pick_pair(ratings_df, excluded_pairs=None, last_pair=None):
-    """
-    Favor players with fewer comparisons so far, so early rounds spread
-    votes across everyone. Also skips any pair this voter has already
-    been shown recently (excluded_pairs), and never immediately repeats
-    the pair they just saw (last_pair).
-    """
     excluded_pairs = excluded_pairs or set()
     if len(ratings_df) < 2:
         st.error("Need at least 2 players in players.csv.")
@@ -352,19 +292,36 @@ def show_image(name):
         st.image(img, use_container_width=True)
 
 
-col1, col2 = st.columns(2)
-with col1:
-    show_image(name_a)
-    if st.button(name_a, use_container_width=True):
-        with st.spinner("Saving your vote..."):
-            register_vote(name_a, name_b)
-        st.rerun()
-with col2:
-    show_image(name_b)
-    if st.button(name_b, use_container_width=True):
-        with st.spinner("Saving your vote..."):
-            register_vote(name_b, name_a)
-        st.rerun()
+# On narrow screens Streamlit stacks the two columns instead of showing
+# them side by side. Left untouched, that reads as image1, name1, image2,
+# name2. This flips just the second column's internal order below the
+# breakpoint, so the visible mobile order becomes image1, name1, name2,
+# image2 - both name buttons land next to each other in the middle.
+st.html("""
+<style>
+@media (max-width: 640px) {
+    .st-key-vote_row [data-testid="stColumn"]:nth-of-type(2) {
+        display: flex !important;
+        flex-direction: column-reverse !important;
+    }
+}
+</style>
+""")
+
+with st.container(key="vote_row"):
+    col1, col2 = st.columns(2)
+    with col1:
+        show_image(name_a)
+        if st.button(name_a, use_container_width=True):
+            with st.spinner("Saving your vote..."):
+                register_vote(name_a, name_b)
+            st.rerun()
+    with col2:
+        show_image(name_b)
+        if st.button(name_b, use_container_width=True):
+            with st.spinner("Saving your vote..."):
+                register_vote(name_b, name_a)
+            st.rerun()
 
 if st.button("Skip this pair"):
     with st.spinner("Loading next matchup..."):
