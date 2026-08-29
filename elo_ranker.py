@@ -432,7 +432,8 @@ def render_top_grid(top_df, players_df):
                 if img is not None:
                     st.image(img, use_container_width=True)
                 badge = streak_badge(row.streak)
-                st.markdown(f"**{rank}. {row.name} {badge}**".strip())
+                label = f"{rank}. {row.name} {badge}".strip()
+                st.markdown(f"**{label}**")
                 st.caption(f"{int(round(row.rating))} · {int(row.comparisons)} comparisons")
 
 
