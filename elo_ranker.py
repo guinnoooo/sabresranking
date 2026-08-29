@@ -1,39 +1,8 @@
-"""
-Pairwise Player Ranker (Supabase-backed)
------------------------------------------
-Public pairwise "who's better" ranking site. Votes are stored permanently
-in Supabase (Postgres) instead of a local CSV, plus some basic anti-abuse
-protections:
 
-  - voter identity: hashed IP address, falling back to a per-session id
-    when no IP is available (e.g. local development)
-  - matchup cooldown: the same voter won't be shown the same pair again
-    for a while, so they can't just repeatedly click one matchup
-  - diminishing influence: nobody is ever blocked from voting, but past
-    a threshold of votes in a day, each further vote from that identity
-    counts for progressively less - a burst from one source moves
-    ratings much less than the same number of votes spread across many
-    different voters
-
-Images: give players.csv an "image" column with a file path or URL, or
-drop a file named after the player (e.g. "Tom Brady.jpg") into an
-"images" folder next to this script - either is picked up automatically.
-Every photo is center-cropped to the same fixed portrait ratio, and
-shown both in the matchup view and in the rankings list below. Anyone
-with no photo found falls back to images/placeholder.jpg - add a file
-there to control what that looks like.
-
-One-time setup:
-  1. Create a free Supabase project, then run schema.sql in its SQL
-     editor (Database > SQL Editor) to create the tables.
-  2. Copy secrets.toml.example to .streamlit/secrets.toml and fill in
-     your Supabase URL/key. Never commit the real secrets.toml.
-  3. pip install -r requirements.txt
-  4. streamlit run elo_ranker.py
-"""
 
 import hashlib
 import os
+import time
 import uuid
 from io import BytesIO
 
@@ -71,16 +40,26 @@ def get_client():
     return create_client(url, key)
 
 
+def execute_with_retry(builder, attempts=3, delay_seconds=1.5):
+    """
+    Run a Supabase query, retrying a couple of times on transient network
+    errors (dropped connections, a paused-project wake-up, brief blips)
+    before giving up. Used in place of a bare .execute() everywhere.
+    """
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return builder.execute()
+        except Exception as e:
+            last_error = e
+            if attempt < attempts - 1:
+                time.sleep(delay_seconds)
+    raise last_error
+
+
 # ---------- voter identity ----------
 
 def get_voter_id():
-    """
-    Hashed IP when Streamlit can see one (true on real deployments),
-    otherwise a per-session random id as a weaker fallback (e.g. local
-    dev, where st.context.ip_address is always None).
-    Note: IP alone is spoofable (VPNs, shared networks) - this is a
-    deterrent layer, not a security guarantee.
-    """
     salt = st.secrets.get("supabase", {}).get("voter_salt", "local-dev-salt")
     ip = st.context.ip_address
     if ip:
@@ -131,12 +110,6 @@ def get_player_image(name, players_df):
 
 @st.cache_data(show_spinner=False)
 def load_cropped_image(path_or_url, max_width):
-    """
-    Open a local file or URL and center-crop it to IMAGE_ASPECT_RATIO,
-    so every player's photo displays at the same shape regardless of
-    what size/orientation the original was. Cached so the same image
-    isn't re-downloaded and re-cropped on every rerun.
-    """
     if path_or_url.startswith(("http://", "https://")):
         resp = requests.get(path_or_url, timeout=10)
         resp.raise_for_status()
@@ -177,7 +150,7 @@ def safe_player_image(name, players_df, max_width):
 # ---------- ratings (Supabase) ----------
 
 def load_ratings(supabase, players_df):
-    resp = supabase.table("ratings").select("*").execute()
+    resp = execute_with_retry(supabase.table("ratings").select("*"))
     ratings_df = pd.DataFrame(resp.data) if resp.data else pd.DataFrame(columns=["name", "rating", "comparisons"])
 
     existing = set(ratings_df["name"]) if not ratings_df.empty else set()
@@ -185,14 +158,21 @@ def load_ratings(supabase, players_df):
     if not missing.empty:
         missing["rating"] = float(INITIAL_RATING)
         missing["comparisons"] = 0
-        supabase.table("ratings").insert(missing.to_dict("records")).execute()
+        execute_with_retry(supabase.table("ratings").insert(missing.to_dict("records")))
         ratings_df = pd.concat([ratings_df, missing], ignore_index=True)
+
+    # Supabase/PostgREST returns whole-number ratings (e.g. a fresh 1500)
+    # as JSON integers rather than decimals, which makes pandas infer an
+    # int column. Later assigning a real (decimal) Elo score into that
+    # column then fails. Force the dtypes explicitly so that never happens.
+    ratings_df["rating"] = ratings_df["rating"].astype(float)
+    ratings_df["comparisons"] = ratings_df["comparisons"].astype(int)
 
     return ratings_df
 
 
 def get_rating_rows(supabase, names):
-    resp = supabase.table("ratings").select("*").in_("name", names).execute()
+    resp = execute_with_retry(supabase.table("ratings").select("*").in_("name", names))
     rows = {row["name"]: row for row in (resp.data or [])}
     missing = [n for n in names if n not in rows]
     if missing:
@@ -222,12 +202,11 @@ def fetch_recent_votes(supabase, voter_id, hours):
     """One query covering both the damping count and the pair-cooldown
     check, since both just need this voter's recent votes."""
     cutoff = (pd.Timestamp.utcnow() - pd.Timedelta(hours=hours)).isoformat()
-    resp = (
+    resp = execute_with_retry(
         supabase.table("votes")
         .select("winner,loser,created_at")
         .eq("voter_id", voter_id)
         .gte("created_at", cutoff)
-        .execute()
     )
     return resp.data or []
 
@@ -237,13 +216,6 @@ def pairs_from_votes(votes):
 
 
 def effective_k(votes_in_window):
-    """
-    Nobody gets blocked - but the first FREE_VOTES_BEFORE_DAMPING votes
-    from an identity in the window count fully, and each vote past that
-    counts for progressively less. A burst from one source ends up
-    moving ratings far less than the same number of votes spread across
-    many different people.
-    """
     over_threshold = max(0, votes_in_window - FREE_VOTES_BEFORE_DAMPING)
     k = K_FACTOR / (1 + over_threshold * DAMPING_PER_EXTRA_VOTE)
     return max(MIN_K, k)
@@ -252,12 +224,6 @@ def effective_k(votes_in_window):
 # ---------- pair selection ----------
 
 def pick_pair(ratings_df, excluded_pairs=None, last_pair=None):
-    """
-    Favor players with fewer comparisons so far, so early rounds spread
-    votes across everyone. Also skips any pair this voter has already
-    been shown recently (excluded_pairs), and never immediately repeats
-    the pair they just saw (last_pair).
-    """
     excluded_pairs = excluded_pairs or set()
     if len(ratings_df) < 2:
         st.error("Need at least 2 players in players.csv.")
@@ -323,15 +289,15 @@ def register_vote(winner, loser):
     new_winner_comparisons = rows[winner]["comparisons"] + 1
     new_loser_comparisons = rows[loser]["comparisons"] + 1
 
-    supabase.table("ratings").upsert([
+    execute_with_retry(supabase.table("ratings").upsert([
         {"name": winner, "rating": new_winner_rating, "comparisons": new_winner_comparisons},
         {"name": loser, "rating": new_loser_rating, "comparisons": new_loser_comparisons},
-    ]).execute()
-    supabase.table("votes").insert({
+    ]))
+    execute_with_retry(supabase.table("votes").insert({
         "winner": winner,
         "loser": loser,
         "voter_id": voter_id,
-    }).execute()
+    }))
 
     # update the in-memory copy directly instead of re-fetching the whole
     # table - saves a full-table round trip on every single vote
@@ -352,12 +318,7 @@ def show_image(name):
         st.image(img, use_container_width=True)
 
 
-# Four elements, in this fixed order: image1, button1, button2, image2.
-# A CSS grid on the wrapping container decides how those four are
-# visually arranged per screen size - desktop pairs each image with its
-# own button side by side, mobile stacks them with both buttons together
-# in the middle. The selector covers two possible Streamlit testid names
-# since which one applies can vary by version.
+
 st.html("""
 <style>
 .st-key-vote_row {
@@ -395,11 +356,19 @@ with st.container(key="vote_row"):
     show_image(name_a)
     if st.button(name_a, use_container_width=True):
         with st.spinner("Saving your vote..."):
-            register_vote(name_a, name_b)
+            try:
+                register_vote(name_a, name_b)
+            except Exception:
+                st.warning("Couldn't reach the database just now - please try again in a moment.")
+                st.stop()
         st.rerun()
     if st.button(name_b, use_container_width=True):
         with st.spinner("Saving your vote..."):
-            register_vote(name_b, name_a)
+            try:
+                register_vote(name_b, name_a)
+            except Exception:
+                st.warning("Couldn't reach the database just now - please try again in a moment.")
+                st.stop()
         st.rerun()
     show_image(name_b)
 
