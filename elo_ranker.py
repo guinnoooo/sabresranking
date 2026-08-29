@@ -21,6 +21,10 @@ PLACEHOLDER_IMAGE = os.path.join(IMAGES_DIR, "placeholder.jpg")  # used when a p
 K_FACTOR = 32
 INITIAL_RATING = 1500
 
+STREAK_THRESHOLD = 5   # consecutive wins/losses before a badge shows
+FIRE_EMOJI = "🔥"
+ICE_EMOJI = "❄️"
+
 # --- anti-abuse tuning (no hard caps - voting is never blocked) ---
 DAMPING_WINDOW_HOURS = 1         # window used to count an identity's "recent" votes
 FREE_VOTES_BEFORE_DAMPING = 50000  # votes in that window before influence starts shrinking
@@ -151,13 +155,14 @@ def safe_player_image(name, players_df, max_width):
 
 def load_ratings(supabase, players_df):
     resp = execute_with_retry(supabase.table("ratings").select("*"))
-    ratings_df = pd.DataFrame(resp.data) if resp.data else pd.DataFrame(columns=["name", "rating", "comparisons"])
+    ratings_df = pd.DataFrame(resp.data) if resp.data else pd.DataFrame(columns=["name", "rating", "comparisons", "streak"])
 
     existing = set(ratings_df["name"]) if not ratings_df.empty else set()
     missing = players_df.loc[~players_df["name"].isin(existing), ["name"]].copy()
     if not missing.empty:
         missing["rating"] = float(INITIAL_RATING)
         missing["comparisons"] = 0
+        missing["streak"] = 0
         execute_with_retry(supabase.table("ratings").insert(missing.to_dict("records")))
         ratings_df = pd.concat([ratings_df, missing], ignore_index=True)
 
@@ -167,6 +172,7 @@ def load_ratings(supabase, players_df):
     # column then fails. Force the dtypes explicitly so that never happens.
     ratings_df["rating"] = ratings_df["rating"].astype(float)
     ratings_df["comparisons"] = ratings_df["comparisons"].astype(int)
+    ratings_df["streak"] = ratings_df["streak"].astype(int)
 
     return ratings_df
 
@@ -289,9 +295,15 @@ def register_vote(winner, loser):
     new_winner_comparisons = rows[winner]["comparisons"] + 1
     new_loser_comparisons = rows[loser]["comparisons"] + 1
 
+    # Positive streak = consecutive wins, negative = consecutive losses.
+    # A win extends an existing win streak or resets a loss streak to 1;
+    # a loss does the mirror image.
+    winner_streak = rows[winner]["streak"] + 1 if rows[winner]["streak"] >= 0 else 1
+    loser_streak = rows[loser]["streak"] - 1 if rows[loser]["streak"] <= 0 else -1
+
     execute_with_retry(supabase.table("ratings").upsert([
-        {"name": winner, "rating": new_winner_rating, "comparisons": new_winner_comparisons},
-        {"name": loser, "rating": new_loser_rating, "comparisons": new_loser_comparisons},
+        {"name": winner, "rating": new_winner_rating, "comparisons": new_winner_comparisons, "streak": winner_streak},
+        {"name": loser, "rating": new_loser_rating, "comparisons": new_loser_comparisons, "streak": loser_streak},
     ]))
     execute_with_retry(supabase.table("votes").insert({
         "winner": winner,
@@ -304,12 +316,27 @@ def register_vote(winner, loser):
     df = st.session_state.ratings_df
     df.loc[df["name"] == winner, "rating"] = new_winner_rating
     df.loc[df["name"] == winner, "comparisons"] = new_winner_comparisons
+    df.loc[df["name"] == winner, "streak"] = winner_streak
     df.loc[df["name"] == loser, "rating"] = new_loser_rating
     df.loc[df["name"] == loser, "comparisons"] = new_loser_comparisons
+    df.loc[df["name"] == loser, "streak"] = loser_streak
 
     excluded_pairs.add(frozenset((winner, loser)))
     st.session_state.last_pair = frozenset((winner, loser))
     st.session_state.current_pair = pick_pair(df, excluded_pairs=excluded_pairs, last_pair=st.session_state.last_pair)
+
+
+def streak_badge(streak):
+    if streak >= STREAK_THRESHOLD:
+        return f"{FIRE_EMOJI} {streak}"
+    if streak <= -STREAK_THRESHOLD:
+        return f"{ICE_EMOJI} {abs(streak)}"
+    return ""
+
+
+def get_streak(df, name):
+    row = df.loc[df["name"] == name]
+    return int(row.iloc[0]["streak"]) if not row.empty else 0
 
 
 def show_image(name):
@@ -354,7 +381,9 @@ st.html("""
 
 with st.container(key="vote_row"):
     show_image(name_a)
-    if st.button(name_a, use_container_width=True):
+    badge_a = streak_badge(get_streak(ratings_df, name_a))
+    label_a = f"{badge_a} {name_a}".strip()
+    if st.button(label_a, use_container_width=True):
         with st.spinner("Saving your vote..."):
             try:
                 register_vote(name_a, name_b)
@@ -362,7 +391,9 @@ with st.container(key="vote_row"):
                 st.warning("Couldn't reach the database just now - please try again in a moment.")
                 st.stop()
         st.rerun()
-    if st.button(name_b, use_container_width=True):
+    badge_b = streak_badge(get_streak(ratings_df, name_b))
+    label_b = f"{badge_b} {name_b}".strip()
+    if st.button(label_b, use_container_width=True):
         with st.spinner("Saving your vote..."):
             try:
                 register_vote(name_b, name_a)
@@ -400,7 +431,8 @@ def render_top_grid(top_df, players_df):
                 img = safe_player_image(row.name, players_df, max_width=400)
                 if img is not None:
                     st.image(img, use_container_width=True)
-                st.markdown(f"**{rank}. {row.name}**")
+                badge = streak_badge(row.streak)
+                st.markdown(f"**{rank}. {row.name} {badge}**".strip())
                 st.caption(f"{int(round(row.rating))} · {int(row.comparisons)} comparisons")
 
 
@@ -414,7 +446,8 @@ def render_rest_list(rest_df):
     for i, row in enumerate(rest_df.itertuples(), start=TOP_N_WITH_IMAGES + 1):
         cols = st.columns([1, 5, 2, 2])
         cols[0].write(f"{i}.")
-        cols[1].write(row.name)
+        badge = streak_badge(row.streak)
+        cols[1].write(f"{row.name} {badge}".strip())
         cols[2].write(int(round(row.rating)))
         cols[3].write(int(row.comparisons))
 
