@@ -327,10 +327,31 @@ def register_vote(winner, loser):
 
 
 def streak_badge(streak):
+    """Emoji badge - used only in the plain-text rest-of-list."""
     if streak >= STREAK_THRESHOLD:
         return f"{FIRE_EMOJI} {streak}"
     if streak <= -STREAK_THRESHOLD:
         return f"{ICE_EMOJI} {abs(streak)}"
+    return ""
+
+
+def streak_text(streak):
+    """Word-form streak note - used next to any name shown with a photo."""
+    if streak >= STREAK_THRESHOLD:
+        return f" ({streak} Win streak)"
+    if streak <= -STREAK_THRESHOLD:
+        return f" ({abs(streak)} Loss streak)"
+    return ""
+
+
+def glow_rule(selector, streak):
+    """CSS rule giving an image a pulsing fire/ice glow, or nothing if
+    this player isn't currently on a qualifying streak. selector should
+    already target the <img> element itself."""
+    if streak >= STREAK_THRESHOLD:
+        return f"{selector} {{ animation: fire-glow-pulse 1.8s ease-in-out infinite; border-radius: 8px; }}"
+    if streak <= -STREAK_THRESHOLD:
+        return f"{selector} {{ animation: ice-glow-pulse 1.8s ease-in-out infinite; border-radius: 8px; }}"
     return ""
 
 
@@ -346,9 +367,34 @@ def show_image(name):
 
 
 
-st.html("""
+streak_a = get_streak(ratings_df, name_a)
+streak_b = get_streak(ratings_df, name_b)
+
+vote_row_glow_rules = "\n".join(filter(None, [
+    glow_rule(
+        '.st-key-vote_row [data-testid="stElementContainer"]:nth-of-type(1) img, '
+        '.st-key-vote_row [data-testid="element-container"]:nth-of-type(1) img',
+        streak_a,
+    ),
+    glow_rule(
+        '.st-key-vote_row [data-testid="stElementContainer"]:nth-of-type(4) img, '
+        '.st-key-vote_row [data-testid="element-container"]:nth-of-type(4) img',
+        streak_b,
+    ),
+]))
+
+st.html(f"""
 <style>
-.st-key-vote_row {
+@keyframes fire-glow-pulse {{
+    0%, 100% {{ box-shadow: 0 0 16px 4px rgba(255,120,20,0.55), 0 0 32px 10px rgba(255,60,0,0.28); }}
+    50% {{ box-shadow: 0 0 24px 7px rgba(255,150,40,0.75), 0 0 42px 13px rgba(255,90,0,0.4); }}
+}}
+@keyframes ice-glow-pulse {{
+    0%, 100% {{ box-shadow: 0 0 16px 4px rgba(130,210,255,0.55), 0 0 32px 10px rgba(90,180,255,0.28); }}
+    50% {{ box-shadow: 0 0 24px 7px rgba(160,225,255,0.75), 0 0 42px 13px rgba(120,200,255,0.4); }}
+}}
+
+.st-key-vote_row {{
     display: grid;
     grid-template-columns: 1fr 1fr;
     grid-template-areas:
@@ -356,33 +402,34 @@ st.html("""
         "btn1 btn2";
     column-gap: 1rem;
     row-gap: 0.5rem;
-}
+}}
 .st-key-vote_row [data-testid="stElementContainer"]:nth-of-type(1),
-.st-key-vote_row [data-testid="element-container"]:nth-of-type(1) { grid-area: img1; }
+.st-key-vote_row [data-testid="element-container"]:nth-of-type(1) {{ grid-area: img1; }}
 .st-key-vote_row [data-testid="stElementContainer"]:nth-of-type(2),
-.st-key-vote_row [data-testid="element-container"]:nth-of-type(2) { grid-area: btn1; align-self: end; }
+.st-key-vote_row [data-testid="element-container"]:nth-of-type(2) {{ grid-area: btn1; align-self: end; }}
 .st-key-vote_row [data-testid="stElementContainer"]:nth-of-type(3),
-.st-key-vote_row [data-testid="element-container"]:nth-of-type(3) { grid-area: btn2; align-self: end; }
+.st-key-vote_row [data-testid="element-container"]:nth-of-type(3) {{ grid-area: btn2; align-self: end; }}
 .st-key-vote_row [data-testid="stElementContainer"]:nth-of-type(4),
-.st-key-vote_row [data-testid="element-container"]:nth-of-type(4) { grid-area: img2; }
+.st-key-vote_row [data-testid="element-container"]:nth-of-type(4) {{ grid-area: img2; }}
 
-@media (max-width: 640px) {
-    .st-key-vote_row {
+@media (max-width: 640px) {{
+    .st-key-vote_row {{
         grid-template-columns: 1fr;
         grid-template-areas:
             "img1"
             "btn1"
             "btn2"
             "img2";
-    }
-}
+    }}
+}}
+
+{vote_row_glow_rules}
 </style>
 """)
 
 with st.container(key="vote_row"):
     show_image(name_a)
-    badge_a = streak_badge(get_streak(ratings_df, name_a))
-    label_a = f"{badge_a} {name_a}".strip()
+    label_a = f"{name_a}{streak_text(streak_a)}"
     if st.button(label_a, use_container_width=True):
         with st.spinner("Saving your vote..."):
             try:
@@ -391,8 +438,7 @@ with st.container(key="vote_row"):
                 st.warning("Couldn't reach the database just now - please try again in a moment.")
                 st.stop()
         st.rerun()
-    badge_b = streak_badge(get_streak(ratings_df, name_b))
-    label_b = f"{badge_b} {name_b}".strip()
+    label_b = f"{name_b}{streak_text(streak_b)}"
     if st.button(label_b, use_container_width=True):
         with st.spinner("Saving your vote..."):
             try:
@@ -423,18 +469,31 @@ GRID_COLUMNS = 5
 def render_top_grid(top_df, players_df):
     """Top players shown as big photo cards, name underneath - sexymp.uk style."""
     rows = list(enumerate(top_df.itertuples(), start=1))
-    for start in range(0, len(rows), GRID_COLUMNS):
+    for row_num, start in enumerate(range(0, len(rows), GRID_COLUMNS)):
         chunk = rows[start:start + GRID_COLUMNS]
-        cols = st.columns(len(chunk))
-        for col, (rank, row) in zip(cols, chunk):
-            with col:
-                img = safe_player_image(row.name, players_df, max_width=400)
-                if img is not None:
-                    st.image(img, use_container_width=True)
-                badge = streak_badge(row.streak)
-                label = f"{rank}. {row.name} {badge}".strip()
-                st.markdown(f"**{label}**")
-                st.caption(f"{int(round(row.rating))} · {int(row.comparisons)} comparisons")
+        row_key = f"grid_row_{row_num}"
+
+        glow_rules = "\n".join(filter(None, [
+            glow_rule(
+                f'.st-key-{row_key} [data-testid="stColumn"]:nth-of-type({position}) img, '
+                f'.st-key-{row_key} [data-testid="column"]:nth-of-type({position}) img',
+                row.streak,
+            )
+            for position, (rank, row) in enumerate(chunk, start=1)
+        ]))
+        if glow_rules:
+            st.html(f"<style>{glow_rules}</style>")
+
+        with st.container(key=row_key):
+            cols = st.columns(len(chunk))
+            for col, (rank, row) in zip(cols, chunk):
+                with col:
+                    img = safe_player_image(row.name, players_df, max_width=400)
+                    if img is not None:
+                        st.image(img, use_container_width=True)
+                    label = f"{rank}. {row.name}{streak_text(row.streak)}".strip()
+                    st.markdown(f"**{label}**")
+                    st.caption(f"{int(round(row.rating))} · {int(row.comparisons)} comparisons")
 
 
 def render_rest_list(rest_df):
