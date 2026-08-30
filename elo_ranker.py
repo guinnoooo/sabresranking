@@ -326,32 +326,23 @@ def register_vote(winner, loser):
     st.session_state.current_pair = pick_pair(df, excluded_pairs=excluded_pairs, last_pair=st.session_state.last_pair)
 
 
-def streak_badge(streak):
-    """Emoji badge - used only in the plain-text rest-of-list."""
-    if streak >= STREAK_THRESHOLD:
-        return f"{FIRE_EMOJI} {streak}"
-    if streak <= -STREAK_THRESHOLD:
-        return f"{ICE_EMOJI} {abs(streak)}"
-    return ""
-
-
 def streak_text(streak):
-    """Word-form streak note - used next to any name shown with a photo."""
+    """Unified 'X emoji' streak note, used everywhere a streak is shown."""
     if streak >= STREAK_THRESHOLD:
-        return f" ({streak} Win streak)"
+        return f" ({streak} {FIRE_EMOJI})"
     if streak <= -STREAK_THRESHOLD:
-        return f" ({abs(streak)} Loss streak)"
+        return f" ({abs(streak)} {ICE_EMOJI})"
     return ""
 
 
 def glow_rule(selector, streak):
-    """CSS rule giving an image a pulsing fire/ice glow, or nothing if
-    this player isn't currently on a qualifying streak. selector should
-    already target the <img> element itself."""
+    """CSS rule giving an image a gentle, subtle pulsing fire/ice glow,
+    or nothing if this player isn't currently on a qualifying streak.
+    selector should already target the <img> element itself."""
     if streak >= STREAK_THRESHOLD:
-        return f"{selector} {{ animation: fire-glow-pulse 1.8s ease-in-out infinite; border-radius: 8px; }}"
+        return f"{selector} {{ animation: fire-glow-pulse 2.6s ease-in-out infinite; border-radius: 8px; }}"
     if streak <= -STREAK_THRESHOLD:
-        return f"{selector} {{ animation: ice-glow-pulse 1.8s ease-in-out infinite; border-radius: 8px; }}"
+        return f"{selector} {{ animation: ice-glow-pulse 2.6s ease-in-out infinite; border-radius: 8px; }}"
     return ""
 
 
@@ -386,12 +377,12 @@ vote_row_glow_rules = "\n".join(filter(None, [
 st.html(f"""
 <style>
 @keyframes fire-glow-pulse {{
-    0%, 100% {{ box-shadow: 0 0 16px 4px rgba(255,120,20,0.55), 0 0 32px 10px rgba(255,60,0,0.28); }}
-    50% {{ box-shadow: 0 0 24px 7px rgba(255,150,40,0.75), 0 0 42px 13px rgba(255,90,0,0.4); }}
+    0%, 100% {{ box-shadow: 0 0 8px 2px rgba(255,120,20,0.25), 0 0 15px 4px rgba(255,60,0,0.12); }}
+    50% {{ box-shadow: 0 0 10px 3px rgba(255,150,40,0.32), 0 0 18px 5px rgba(255,90,0,0.16); }}
 }}
 @keyframes ice-glow-pulse {{
-    0%, 100% {{ box-shadow: 0 0 16px 4px rgba(130,210,255,0.55), 0 0 32px 10px rgba(90,180,255,0.28); }}
-    50% {{ box-shadow: 0 0 24px 7px rgba(160,225,255,0.75), 0 0 42px 13px rgba(120,200,255,0.4); }}
+    0%, 100% {{ box-shadow: 0 0 8px 2px rgba(130,210,255,0.25), 0 0 15px 4px rgba(90,180,255,0.12); }}
+    50% {{ box-shadow: 0 0 10px 3px rgba(160,225,255,0.32), 0 0 18px 5px rgba(120,200,255,0.16); }}
 }}
 
 .st-key-vote_row {{
@@ -506,8 +497,7 @@ def render_rest_list(rest_df):
     for i, row in enumerate(rest_df.itertuples(), start=TOP_N_WITH_IMAGES + 1):
         cols = st.columns([1, 5, 2, 2])
         cols[0].write(f"{i}.")
-        badge = streak_badge(row.streak)
-        cols[1].write(f"{row.name} {badge}".strip())
+        cols[1].write(f"{row.name}{streak_text(row.streak)}")
         cols[2].write(int(round(row.rating)))
         cols[3].write(int(row.comparisons))
 
